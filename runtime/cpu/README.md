@@ -3,7 +3,8 @@
 | File | What it is |
 |---|---|
 | `cpu.h` | `Cpu` (registers, NZCV, TPIDR, exclusives, FPCR/FPSR, vectors), memory accesses and the `rt_*` services the generated C uses |
-| `simd.h`, `simd_fp.h` | AArch64 NEON and floating point in portable C |
+| `simd.h`, `simd_fp.h` | AArch64 NEON and floating point in portable C; on x86-64 Linux the rare slow paths (`SN`) are `preserve_all`, so that their call sites spill no vector registers |
+| `simd_vloc.h` | The V register macros the generated code uses: a local array in functions `recomp/vregs.py` follows, `c->v` in the rest |
 | `dispatch.c`, `dispatch.h` | `rt_dispatch`: indirect calls through an address table |
 | `sjlj.c` | Guest `setjmp`/`longjmp`: a setjmp caller's body runs under a host setjmp point, and a dispatch into the middle of a live one (the guest longjmp's `BR x30`) jumps back to it |
 | `hostfn.c` | Host functions at guest addresses (`HOST_OVERRIDE`): this is how an `nn::*` function is replaced by name; `HOST_FUNCTION` gives an address to a function without a symbol (virtual tables of objects the host hands to the game). `MKW_HOST_TIME=1`: time each one keeps a game thread stopped (render and the rest), every 600 frames |

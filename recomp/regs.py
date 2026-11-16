@@ -63,6 +63,7 @@ class Plan:
         # the reloads depend on the function only: built once, not per instruction (a fifth of gen.py's time)
         self.reload = ''.join(f' {name(r)} = {cpu(r)};' for r in regs)
         self.reload_call = ''.join(f' {name(r)} = {cpu(r)};' for r in regs if r not in kept)
+        self.vplan = None    # recomp/vregs.py: V registers synced at the same points
 
     def decl(self):
         """Locals at the top of the function, loaded from the Cpu."""
@@ -78,7 +79,12 @@ class Plan:
         if '\x00' not in text:
             return text
         spill = ''.join(f'{cpu(r)} = {name(r)}; ' for r in sorted(self.spill[i]))
-        return text.replace(SPILL, spill).replace(RELOAD, self.reload).replace(RELOAD_CALL, self.reload_call)
+        reload, reload_call = self.reload, self.reload_call
+        if self.vplan:
+            spill += self.vplan.spill_text(i)
+            reload += self.vplan.reload
+            reload_call += self.vplan.reload
+        return text.replace(SPILL, spill).replace(RELOAD, reload).replace(RELOAD_CALL, reload_call)
 
 
 def plan(texts, succ, clean, n_locals=LOCALS, kept=CALLEE_SAVED):

@@ -42,6 +42,7 @@ import jumptables  # noqa: E402
 import nso  # noqa: E402
 import patches  # noqa: E402
 import regs  # noqa: E402
+import vregs  # noqa: E402
 from layout import layout, write as write_layout  # noqa: E402
 from lifter import hx  # noqa: E402
 from module import Module  # noqa: E402
@@ -256,6 +257,7 @@ class Emitter:
         self.spins = spins or {}       # {spin wait back-edge: its head} (recomp/patches.py `spin`)
         self.spanned = spanned or {}   # {span start: (set index, span end)} (skipped whole when the set is on)
         self.reg_locals = reg_locals   # recomp/regs.py: registers per function in C locals
+        self.v_locals = os.environ.get('MKW_GEN_V_LOCALS', '1') != '0'   # recomp/vregs.py
         self.kept = regs.CALLEE_SAVED if callee_saved else frozenset()   # not reloaded after a call
         self.sj_owners = setjmp_owners(mod, np.fromiter(sorted(starts), dtype=np.int64))
         self.uses_patches = False
@@ -415,7 +417,8 @@ class Emitter:
             out = [f'static void {fb}(Cpu *c);',
                    f'void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)});', f'    c->pc = {hx(entry)};',
                    f'    {enter}', '}',
-                   f'static void {fb}(Cpu *c) {{', f'    switch (c->pc) {{ {cases} default: break; }}',
+                   f'static void {fb}(Cpu *c) {{', '    u128 *const V = c->v; (void)V;',
+                   f'    switch (c->pc) {{ {cases} default: break; }}',
                    f'    {MUSTTAIL} rt_dispatch(c);']
         else:
             redispatch = f'{MUSTTAIL} rt_dispatch(c);'
@@ -591,8 +594,19 @@ class Emitter:
                 out.append('    ' + rp.decl())
             self.stats['local_reg_functions'] += bool(rp.regs)
             self.stats['reg_spills'] += sum(len(s) for s in rp.spill)
+            # V registers in locals (recomp/vregs.py); not with patched sites, whose replacements it does not follow
+            has_patch = any(entry + 4 * i in self.patched for i in range(n))
+            vp = None if has_patch or not self.v_locals else vregs.plan(texts, succ, clean, regs.SPILL)
+            rp.vplan = vp
+            if vp:
+                out.append('    ' + vp.decl())
+                body = [(i, vregs.DIRECT.sub(r'VX(\1)', line)) for i, line in body]
+                self.stats['local_v_functions'] += 1
+                self.stats['v_spills'] += sum(len(s) for s in vp.spill)
+            else:
+                out.append('    u128 *const V = c->v; (void)V;')
             out += [line if i is None else rp.resolve(i, line) for i, line in body]
-        else:
+        else:   # all_labels: fb_<entry> holds the body and declares V (above)
             out += [line for _, line in body]
         out.append('}')
         self.stats['functions'] += 1
@@ -612,7 +626,7 @@ def chunk_text(name, number, emitter, fns):
     protos = ''.join(f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs))
     if emitter.uses_patches:
         protos += 'extern uint8_t rt_patch_on[];\n'
-    return (header(f'{name} chunk {number:04d}') + '#include "cpu.h"\n#include "simd.h"\n\n' + protos + '\n'
+    return (header(f'{name} chunk {number:04d}') + '#include "cpu.h"\n#include "simd.h"\n#include "simd_vloc.h"\n\n' + protos + '\n'
             + '\n\n'.join(body) + '\n')
 
 
