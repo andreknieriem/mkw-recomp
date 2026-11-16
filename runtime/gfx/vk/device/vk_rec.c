@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cfg.h"
 #include "host.h"
 #include "vk.h"
 #include "vk_rec_diff.h"
@@ -74,11 +75,15 @@ static inline void publish_tail(uint64_t t) {
 static void rec_main(void *arg) {
     (void)arg;
     plat_thread_priority(rec_prio);
+    // MKW_REC_SPIN_N (experiment, perf-deck): pauses on head before sleeping, 4096 by default
+    const char *e = cfg_get("MKW_REC_SPIN_N");
+    int spin_n = e && *e ? atoi(e) : 4096;
+    if (e && *e) rt_log("vk_rec: idle spin %d pauses (MKW_REC_SPIN_N)", spin_n);
     uint64_t t = 0;
     for (;;) {
         uint64_t h = __atomic_load_n(&head, __ATOMIC_ACQUIRE);
         if (t == h) {
-            for (int i = 0; i < 4096 && t == h; i++) plat_pause(), h = __atomic_load_n(&head, __ATOMIC_ACQUIRE);
+            for (int i = 0; i < spin_n && t == h; i++) plat_pause(), h = __atomic_load_n(&head, __ATOMIC_ACQUIRE);
             if (t == h) {
                 __atomic_store_n(&sleeping, 1, __ATOMIC_SEQ_CST);
                 h = __atomic_load_n(&head, __ATOMIC_SEQ_CST);
