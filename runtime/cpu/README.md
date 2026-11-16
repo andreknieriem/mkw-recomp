@@ -3,7 +3,8 @@
 | File | What it is |
 |---|---|
 | `cpu.h` | `Cpu` (registers, NZCV, TPIDR, exclusives, FPCR/FPSR, vectors), memory accesses and the `rt_*` services the generated C uses |
-| `simd.h`, `simd_fp.h` | AArch64 NEON and floating point in portable C |
+| `simd.h`, `simd_fp.h` | AArch64 NEON and floating point in portable C; on x86-64 Linux the rare slow paths (`SN`) are `preserve_all`, so that their call sites spill no vector registers |
+| `simd_vloc.h` | The V register macros the generated code uses: a local array in functions `recomp/vregs.py` follows, `c->v` in the rest |
 | `dispatch.c`, `dispatch.h` | `rt_dispatch`: indirect calls through an address table |
 | `fma.c` | Correctly rounded `fma`/`fmaf` (totk-pc-recomp, from musl) for game code built for x86-64-v2 (`MKW_SETUP_CPU=v2`, CPUs without FMA); empty in a v3 build |
 | `sjlj.c` | Guest `setjmp`/`longjmp`: a setjmp caller's body runs under a host setjmp point, and a dispatch into the middle of a live one (the guest longjmp's `BR x30`) jumps back to it |

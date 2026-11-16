@@ -19,7 +19,11 @@
 
 typedef __uint128_t u128;
 #define SI static inline __attribute__((always_inline))
+#if defined(__x86_64__) && defined(__clang__) && !defined(_WIN32)
+#define SN static __attribute__((noinline, cold, preserve_all))
+#else
 #define SN static __attribute__((noinline))
+#endif
 #define SIMD_CAT2(a, b) a##_##b
 #define SIMD_CAT(a, b) SIMD_CAT2(a, b)
 

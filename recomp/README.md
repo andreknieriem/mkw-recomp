@@ -20,6 +20,11 @@ Changes against the original:
   `tools/git/pre-commit` watches for it. Every back edge of a loop without calls carries a compiler barrier
   (`__asm__ volatile("" ::: "memory")`): without it clang hoists out of the loop the loads another thread changes and
   leaves a `jmp` to itself (`main+0x27ebb20`, which `spin_waits.py` does not recognise).
+- `vregs.py` (new) with `gen.py` and `regs.py`: V0-V31 in a function-local array where every V access is one it follows,
+  synced with the Cpu where X registers are; with the slow FP paths `preserve_all` on x86-64 Linux (`runtime/cpu/simd.h`
+  `SN`). Steam Deck, 1.8.0, Grand Prix with 24 karts, frames 900-1500 after the
+  course flyover starts: game code 173.9 -> 162.4 M instructions and 330.7 -> 302.1 M cycles a frame (4 and 3 runs);
+  a time trial with the kart standing still: no change in cycles.
 
 Usage: `uv run python recomp/gen.py --exefs game/exefs --jobs 8` (~2.5 min, 887 MB of C); `--out`
 and `--patches` default to the dump's version (1.0.0: `build/generated` with `patches-mkw.txt`, 1.8.0:
@@ -33,6 +38,7 @@ and its table).
 | `lifter.py` | AArch64 decoder → C statements per instruction |
 | `simd_c.py` | NEON/FP → C |
 | `flags.py`, `regs.py` | NZCV and the most used registers in local variables |
+| `vregs.py` | V0-V31 in a local array (`runtime/cpu/simd_vloc.h`) in functions whose every V access it follows; `MKW_GEN_V_LOCALS=0` turns it off |
 | `jumptables.py` | Jump tables resolved symbolically |
 | `gen.py` | Generates the C by function, in parallel processes |
 | `layout.py` | Load addresses of the modules |
