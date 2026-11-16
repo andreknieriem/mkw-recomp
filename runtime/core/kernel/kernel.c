@@ -396,9 +396,20 @@ void kern_run_on_guest_main(void (*fn)(Cpu *c)) {
 // SDK's 20 us polling sleeps, main thread and job workers, about 1.5 per frame each, took 460-515 us). Sleeps up to
 // twice that spin on the clock instead (1 ms on Windows, 120 us on Linux); the virtual core is already given up.
 #define SLEEP_SPIN_NS (2 * PLAT_WAIT_LATE_NS)
+// MKW_SLEEP_SPIN_US (experiment, perf-deck): the spin limit in microseconds instead (0: every sleep waits in the OS)
+static int64_t sleep_spin_ns(void) {
+    static int64_t v = -1;
+    if (v < 0) {
+        const char *e = cfg_get("MKW_SLEEP_SPIN_US");
+        v = e && *e ? (int64_t)atoll(e) * 1000 : SLEEP_SPIN_NS;
+        if (e && *e) rt_log("kernel: sleeps up to %lld us spin (MKW_SLEEP_SPIN_US)", (long long)(v / 1000));
+    }
+    return v;
+}
+
 void sleep_ns(RtThread *t, int64_t ns) {
     (void)t;
-    if (ns <= SLEEP_SPIN_NS) {
+    if (ns <= sleep_spin_ns()) {
         uint64_t end = kern_now_ns() + (uint64_t)ns;
         while (kern_now_ns() < end) plat_pause();
         return;
