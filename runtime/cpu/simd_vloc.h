@@ -41,3 +41,22 @@
     ((void)FP_SETS(d, op_s(c, FOP_MADD, (na) ? neg_s(VSF32(a)) : VSF32(a), (nn) ? neg_s(VSF32(n)) : VSF32(n), VSF32(m))))
 #define fp_fma_d(c, na, nn, d, n, m, a) \
     ((void)FP_SETD(d, op_d(c, FOP_MADD, (na) ? neg_d(VSF64(a)) : VSF64(a), (nn) ? neg_d(VSF64(n)) : VSF64(n), VSF64(m))))
+// sl_* / sv_* helpers that index V registers by number: on V, the local array or c->v (recomp/vregs.py HELPERS)
+#undef sl_gen
+#define sl_gen(c, ...) sl_gen_r(c, (u128 *)V, __VA_ARGS__)
+#undef sl_across
+#define sl_across(c, ...) sl_across_r(c, (u128 *)V, __VA_ARGS__)
+#undef sv_fred_s
+#define sv_fred_s(c, ...) sv_fred_s_r(c, (u128 *)V, __VA_ARGS__)
+#undef sv_tbl
+#define sv_tbl(c, ...) sv_tbl_r(c, (u128 *)V, __VA_ARGS__)
+#undef sl_ldm
+#define sl_ldm(c, ...) sl_ldm_r(c, (u128 *)V, __VA_ARGS__)
+#undef sl_stm
+#define sl_stm(c, ...) sl_stm_r(c, (u128 *)V, __VA_ARGS__)
+#undef sl_lds
+#define sl_lds(c, ...) sl_lds_r(c, (u128 *)V, __VA_ARGS__)
+#undef sl_sts
+#define sl_sts(c, ...) sl_sts_r(c, (u128 *)V, __VA_ARGS__)
+#undef sl_ldr
+#define sl_ldr(c, ...) sl_ldr_r(c, (u128 *)V, __VA_ARGS__)

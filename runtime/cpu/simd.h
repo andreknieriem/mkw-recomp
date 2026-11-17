@@ -596,15 +596,16 @@ SI uint64_t lop(int op, int sz, uint64_t a, uint64_t b, uint64_t d) {
 // Generic lane loop: ne lanes; result lane i (size szd) goes to lane offd+i of d (other lanes kept when keep,
 // else zero); a = n lane offn+i (size szn), b = m lane offm+i (size szm), or lane bidx of m when bidx >= 0,
 // or the constant bimm when m < 0; the accumulator is d's old lane offd+i.
-SI void sl_gen(Cpu *c, int op, int sz, int ne, int d, int szd, int offd, int keep, int n, int szn, int offn, int m,
+SI void sl_gen_r(Cpu *c, u128 *vr, int op, int sz, int ne, int d, int szd, int offd, int keep, int n, int szn, int offn, int m,
                int szm, int offm, int bidx, uint64_t bimm) {
-    u128 a = c->v[n], b = m >= 0 ? c->v[m] : 0, o = c->v[d], r = keep ? o : 0;
+    u128 a = vr[n], b = m >= 0 ? vr[m] : 0, o = vr[d], r = keep ? o : 0;
     for (int i = 0; i < ne; i++) {
         uint64_t y = m < 0 ? bimm : lget(&b, szm, bidx >= 0 ? bidx : offm + i);
         lset(&r, szd, offd + i, lop(op, sz, lget(&a, szn, offn + i), y, lget(&o, szd, offd + i)));
     }
-    c->v[d] = r;
+    vr[d] = r;
 }
+#define sl_gen(c, ...) sl_gen_r(c, (c)->v, __VA_ARGS__)
 // SADDLP/UADDLP/SADALP/UADALP
 SI void sl_addlp(Cpu *c, int u, int acc, int Q, int sz, int d, int n) {
     u128 a = c->v[n], o = c->v[d], r = 0;
@@ -616,8 +617,8 @@ SI void sl_addlp(Cpu *c, int u, int acc, int Q, int sz, int d, int n) {
     c->v[d] = r;
 }
 // ADDV, SADDLV/UADDLV, SMAXV/UMAXV, SMINV/UMINV (op 0..3; u = unsigned)
-SI void sl_across(Cpu *c, int op, int u, int Q, int sz, int d, int n) {
-    u128 a = c->v[n];
+SI void sl_across_r(Cpu *c, u128 *vr, int op, int u, int Q, int sz, int d, int n) {
+    u128 a = vr[n];
     int ne = (8 << Q) >> sz;
     int64_t acc = u ? (int64_t)lget(&a, sz, 0) : lsx(lget(&a, sz, 0), sz);
     for (int i = 1; i < ne; i++) {
@@ -626,8 +627,9 @@ SI void sl_across(Cpu *c, int op, int u, int Q, int sz, int d, int n) {
         else if (op == 2) acc = u ? ((uint64_t)x > (uint64_t)acc ? x : acc) : (x > acc ? x : acc);
         else acc = u ? ((uint64_t)x < (uint64_t)acc ? x : acc) : (x < acc ? x : acc);
     }
-    c->v[d] = (uint64_t)acc & lmask(op == 1 ? sz + 1 : sz);
+    vr[d] = (uint64_t)acc & lmask(op == 1 ? sz + 1 : sz);
 }
+#define sl_across(c, ...) sl_across_r(c, (c)->v, __VA_ARGS__)
 // PMULL2/PMULL 1Q (64x64 -> 128 carry-less)
 SI void sl_pmull64(Cpu *c, int part, int d, int n, int m) {
     uint64_t hi, lo = pmul64(((sa64 *)&c->v[n])[part], ((sa64 *)&c->v[m])[part], &hi);
@@ -644,10 +646,11 @@ SI vf64 vneg_d(vf64 v) { return (vf64)((vu64)v ^ 0x8000000000000000ull); }
 SI float pair_s(Cpu *c, int op, float a, float b) { return op_s(c, op, a, b, 0); }
 SI double pair_d(Cpu *c, int op, double a, double b) { return op_d(c, op, a, b, 0); }
 // FMAXV/FMINV/FMAXNMV/FMINNMV (4S): pairwise tree
-SI void sv_fred_s(Cpu *c, int op, int d, int n) {
-    vf32 v = VREG(vf32, n);
-    c->v[d] = fb_s(pair_s(c, op, pair_s(c, op, v[0], v[1]), pair_s(c, op, v[2], v[3])));
+SI void sv_fred_s_r(Cpu *c, u128 *vr, int op, int d, int n) {
+    vf32 v = (*(vf32 *)&vr[n]);
+    *(vf32 *)&vr[d] = (vf32){pair_s(c, op, pair_s(c, op, v[0], v[1]), pair_s(c, op, v[2], v[3])), 0, 0, 0};
 }
+#define sv_fred_s(c, ...) sv_fred_s_r(c, (c)->v, __VA_ARGS__)
 // lane-wise FP conversions
 SI vu32 vtoint_s(Cpu *c, vf32 v, int rm, int fbits, int uns) {
     vu32 r;
@@ -707,16 +710,17 @@ SI void sv_fcvtn(Cpu *c, int sz, int part, int odd, int d, int n) {
 }
 
 // TBL / TBX with len+1 table registers
-SI void sv_tbl(Cpu *c, int Q, int len, int tbx, int d, int n, int m) {
+SI void sv_tbl_r(Cpu *c, u128 *vr, int Q, int len, int tbx, int d, int n, int m) {
     uint8_t tab[64];
-    for (int i = 0; i <= len; i++) memcpy(tab + 16 * i, &c->v[(n + i) & 31], 16);
-    u128 idx = c->v[m], o = c->v[d], r = 0;
+    for (int i = 0; i <= len; i++) memcpy(tab + 16 * i, &vr[(n + i) & 31], 16);
+    u128 idx = vr[m], o = vr[d], r = 0;
     for (int i = 0; i < 8 << Q; i++) {
         unsigned k = (unsigned)lget(&idx, 0, i);
         lset(&r, 0, i, k < 16u * (len + 1) ? tab[k] : tbx ? lget(&o, 0, i) : 0);
     }
-    c->v[d] = r;
+    vr[d] = r;
 }
+#define sv_tbl(c, ...) sv_tbl_r(c, (c)->v, __VA_ARGS__)
 
 // ---- CRC32 / CRC32C (bytes = 1, 2, 4, 8)
 SI uint32_t simd_crc(const uint32_t *t, uint32_t acc, uint64_t v, int bytes) {
@@ -838,39 +842,64 @@ SI void simd_st(uint64_t a, int sz, uint64_t v) {
     }
 }
 // LDn/STn (multiple structures): selem interleaved registers, rpt repeats (LD1 with 2-4 registers)
-SI void sl_ldm(Cpu *c, int Q, int sz, int selem, int rpt, int t, uint64_t ea) {
+SI void sl_ldm_r(Cpu *c, u128 *vr, int Q, int sz, int selem, int rpt, int t, uint64_t ea) {
     u128 r[4] = {0, 0, 0, 0};
     int ne = (8 << Q) >> sz;
     for (int k = 0; k < rpt; k++)
         for (int e = 0; e < ne; e++)
             for (int s = 0; s < selem; s++, ea += 1 << sz) lset(&r[k + s], sz, e, simd_ld(ea, sz));
-    for (int i = 0; i < rpt + selem - 1; i++) c->v[(t + i) & 31] = r[i];
+    for (int i = 0; i < rpt + selem - 1; i++) vr[(t + i) & 31] = r[i];
 }
-SI void sl_stm(Cpu *c, int Q, int sz, int selem, int rpt, int t, uint64_t ea) {
+#define sl_ldm(c, ...) sl_ldm_r(c, (c)->v, __VA_ARGS__)
+SI void sl_stm_r(Cpu *c, u128 *vr, int Q, int sz, int selem, int rpt, int t, uint64_t ea) {
     u128 r[4];
     int ne = (8 << Q) >> sz;
-    for (int i = 0; i < rpt + selem - 1; i++) r[i] = c->v[(t + i) & 31];
+    for (int i = 0; i < rpt + selem - 1; i++) r[i] = vr[(t + i) & 31];
     for (int k = 0; k < rpt; k++)
         for (int e = 0; e < ne; e++)
             for (int s = 0; s < selem; s++, ea += 1 << sz) simd_st(ea, sz, lget(&r[k + s], sz, e));
 }
+#define sl_stm(c, ...) sl_stm_r(c, (c)->v, __VA_ARGS__)
 // single structure: lane idx of selem registers; LDnR replicates into every lane
-SI void sl_lds(Cpu *c, int sz, int selem, int idx, int t, uint64_t ea) {
-    for (int s = 0; s < selem; s++) {
-        u128 v = c->v[(t + s) & 31];
-        lset(&v, sz, idx, simd_ld(ea + (s << sz), sz));
-        c->v[(t + s) & 31] = v;
+// Lane access through the vector types, not u128: with V a local array (simd_vloc.h), clang keeps a register that is
+// only ever accessed as vectors in an XMM register, and one accessed as i128 in a general register pair.
+SI uint64_t vlget(const u128 *p, int sz, int i) {
+    switch (sz) {
+    case 0: return (*(const vu8 *)p)[i];
+    case 1: return (*(const vu16 *)p)[i];
+    case 2: return (*(const vu32 *)p)[i];
+    default: return (*(const vu64 *)p)[i];
     }
 }
-SI void sl_sts(Cpu *c, int sz, int selem, int idx, int t, uint64_t ea) {
-    for (int s = 0; s < selem; s++) simd_st(ea + (s << sz), sz, lget(&c->v[(t + s) & 31], sz, idx));
+SI void vlset(u128 *p, int sz, int i, uint64_t x) {
+    switch (sz) {
+    case 0: (*(vu8 *)p)[i] = (uint8_t)x; break;
+    case 1: (*(vu16 *)p)[i] = (uint16_t)x; break;
+    case 2: (*(vu32 *)p)[i] = (uint32_t)x; break;
+    default: (*(vu64 *)p)[i] = x; break;
+    }
 }
-SI void sl_ldr(Cpu *c, int Q, int sz, int selem, int t, uint64_t ea) {
+SI void sl_lds_r(Cpu *c, u128 *vr, int sz, int selem, int idx, int t, uint64_t ea) {
+    for (int s = 0; s < selem; s++) vlset(&vr[(t + s) & 31], sz, idx, simd_ld(ea + (s << sz), sz));
+}
+#define sl_lds(c, ...) sl_lds_r(c, (c)->v, __VA_ARGS__)
+SI void sl_sts_r(Cpu *c, u128 *vr, int sz, int selem, int idx, int t, uint64_t ea) {
+    for (int s = 0; s < selem; s++) simd_st(ea + (s << sz), sz, vlget(&vr[(t + s) & 31], sz, idx));
+}
+#define sl_sts(c, ...) sl_sts_r(c, (c)->v, __VA_ARGS__)
+SI void sl_ldr_r(Cpu *c, u128 *vr, int Q, int sz, int selem, int t, uint64_t ea) {
     uint64_t x[4];
     for (int s = 0; s < selem; s++) x[s] = simd_ld(ea + (s << sz), sz);
     for (int s = 0; s < selem; s++) {
-        u128 v = 0;
-        for (int e = 0; e < (8 << Q) >> sz; e++) lset(&v, sz, e, x[s]);
-        c->v[(t + s) & 31] = v;
+        vu64 v;
+        switch (sz) {
+        case 0: v = (vu64)((vu8){} + (uint8_t)x[s]); break;
+        case 1: v = (vu64)((vu16){} + (uint16_t)x[s]); break;
+        case 2: v = (vu64)((vu32){} + (uint32_t)x[s]); break;
+        default: v = (vu64){} + x[s]; break;
+        }
+        if (!Q) v[1] = 0;
+        *(vu64 *)&vr[(t + s) & 31] = v;
     }
 }
+#define sl_ldr(c, ...) sl_ldr_r(c, (c)->v, __VA_ARGS__)
