@@ -407,9 +407,20 @@ static int64_t sleep_spin_ns(void) {
     return v;
 }
 
+// MKW_SPIN_LESS (experiment, perf-deck; 0|1|ab): no spinning sleeps and the recorder's idle spin cut to 64 pauses
+// (vk_rec.c), the two together; "ab" switches them with the A/B blocks (MKW_AB) to measure the frame rate in one run
+int rt_spin_less(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        mode = rt_knob("SPIN_LESS", "0");
+        if (mode) rt_log("kernel: no spinning sleeps, recorder spin 64 (MKW_SPIN_LESS)%s", mode == 2 ? " in the B blocks" : "");
+    }
+    return RT_KNOB_ON(mode);
+}
+
 void sleep_ns(RtThread *t, int64_t ns) {
     (void)t;
-    if (ns <= sleep_spin_ns()) {
+    if (ns <= (rt_spin_less() ? 0 : sleep_spin_ns())) {
         uint64_t end = kern_now_ns() + (uint64_t)ns;
         while (kern_now_ns() < end) plat_pause();
         return;
