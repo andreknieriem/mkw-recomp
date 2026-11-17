@@ -261,7 +261,13 @@ SI void simd_rm_leave(simd_fpstate old) {
 
 // The thread's MXCSR mirrors the guest FPCR.FZ with RC = nearest whenever guest code runs (cpu.h rt_fpcr_sync), so
 // plain host FP gives the ARM result unless FPCR.RMode asks for directed rounding, which the slow paths handle.
+#if defined(MKW_FAST_FP2)
+// experiment (perf-deck): the game code never sets FPCR.RMode (main sets only FZ; the SDK's fmal alone rounds
+// otherwise, through fesetround): round to nearest, without reading FPCR
+SI int simd_directed(const Cpu *c) { (void)c; return 0; }
+#else
 SI int simd_directed(const Cpu *c) { return __builtin_expect((c->fpcr & FPCR_RM) != 0, 0); }
+#endif
 
 #define F s
 #define T float

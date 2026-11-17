@@ -228,7 +228,9 @@ SI VT FN(vfz)(Cpu *c, VT a) { return c->fpcr & FPCR_FZ ? FN(vflush)(a) : a; }
 
 // ---- compares
 SI uint64_t FN(cmp)(Cpu *c, T a, T b) { // FCMP NZCV
+#if !defined(MKW_FAST_FP2)   // FAST_FP2: the host's DAZ (equal to FPCR.FZ while guest code runs) zeroes them in ucomis
     a = FN(fz)(c, a), b = FN(fz)(c, b);
+#endif
     return a == b ? 0x60000000ull : a < b ? 0x80000000ull : a > b ? 0x20000000ull : 0x30000000ull;
 }
 // FCMEQ/FCMGE/FCMGT/FACGE/FACGT (op 0..4)
@@ -307,7 +309,7 @@ SN T FN(fromint_slow)(Cpu *c, uint64_t v, int ib, int uns, int fbits) {
     return x;
 }
 SI T FN(fromint)(Cpu *c, uint64_t v, int ib, int uns, int fbits) {
-    if (__builtin_expect(c->fpcr & FPCR_RM, 0)) return FN(fromint_slow)(c, v, ib, uns, fbits);
+    if (simd_directed(c)) return FN(fromint_slow)(c, v, ib, uns, fbits);
     T r;
     if (uns) r = ib == 32 ? (T)(uint32_t)v : (T)v;
     else r = ib == 32 ? (T)(int32_t)v : (T)(int64_t)v;
