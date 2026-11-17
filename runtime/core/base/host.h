@@ -316,6 +316,7 @@ uint64_t frame_step_ticks(void);                           // game time since th
 // compares the windows that are wholly A or wholly B).
 int rt_ab(void);
 int rt_knob(const char *name, const char *def);
+int rt_spin_less(void);   // kernel.c: MKW_SPIN_LESS (experiment, perf-deck)
 #define RT_KNOB_ON(mode) ((mode) == 2 ? rt_ab() : (mode))
 extern volatile uint64_t nvn_timestamp_last; // nvn_ext.c: the counter timestamp the game read last (ticks)
 void frame_step_present(uint64_t display_ns, int interval); // nvnQueuePresentTexture: the frame's display time and
