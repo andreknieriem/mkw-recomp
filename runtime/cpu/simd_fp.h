@@ -172,6 +172,10 @@ SI T FN(op)(Cpu *c, int op, T a, T b, T d) {
         if (c->fpcr & FPCR_FZ) a = FN(flush)(a), b = FN(flush)(b);
         return FN(minmax)(c, op, a, b);
     }
+#if defined(MKW_FAST_FP)
+    // experiment (perf-deck): the host's result for the plain arithmetic, without the ARM NaN and tininess fix-ups
+    if (op != FOP_MULX && op < FOP_RECPS) return FCALC(op, a, b, d, K);
+#endif
     T r = FCALC(op, a, b, d, K);
     if (__builtin_expect(op == FOP_RSQRTS ? FREDO(op, r) : !FOK(r), 0)) r = FN(redo)(c, op, a, b, d, r);
     return r;
@@ -211,6 +215,9 @@ SI VT FN(vop)(Cpu *c, int op, VT a, VT b, VT d) {
             r = (VT)FN(vsel)(a < b, x, FN(vsel)(a == b, x | y, y));
         return r;
     }
+#if defined(MKW_FAST_FP)
+    if (op != FOP_MULX && op < FOP_RECPS) return FCALC(op, a, b, d, VK);
+#endif
     r = FCALC(op, a, b, d, VK);
     if (__builtin_expect(op == FOP_RSQRTS ? __builtin_reduce_or(FREDO(op, r)) != 0 : __builtin_reduce_and(FOK(r)) == 0, 0))
         return FN(vslow)(c, op, a, b, d);
