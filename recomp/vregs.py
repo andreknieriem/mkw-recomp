@@ -17,10 +17,72 @@ register; fp_op_s/d and fp_fma_s/d with literal registers (simd_vloc.h makes the
 function that calls a helper reading V registers itself (sl_*, sv_* below) or uses one of the forms with a register
 that is not a literal keeps the Cpu: nothing here guesses.
 """
+import os
 import re
 
-# helpers that take register numbers and read or write c->v inside (runtime/cpu/simd.h): the function keeps the Cpu
-CPU_ONLY = re.compile(r'\b(?:sl_\w+|sv_\w+)\(c\b')
+# helpers that take register numbers and read or write V registers inside (runtime/cpu/simd.h). Those in HELPERS work on
+# V (simd_vloc.h maps them to their _r form); given literal register arguments, regs() names what they touch. A
+# function calling any other one keeps the Cpu.
+def _rng(t, k):
+    return [(t + i) & 31 for i in range(k)]
+
+
+HELPERS = {   # name -> the registers of its arguments (a: the arguments after c, as ints where literal)
+    'sv_fred_s': lambda a: [a[1], a[2]],
+    'sl_lds': lambda a: _rng(a[3], a[1]),                                # t .. t+selem-1
+    'sl_sts': lambda a: _rng(a[3], a[1]),
+    'sl_ldr': lambda a: _rng(a[3], a[2]),
+}
+CPU_ONLY = re.compile(r'\b(?!(?:' + '|'.join(HELPERS) + r')\()(?:sl_\w+|sv_\w+)\(c\b')
+HELPER_CALL = re.compile(r'\b(' + '|'.join(HELPERS) + r')\(c,')
+
+
+def _args(text, i):
+    """The top-level arguments of the call whose '(' is at text[i], as ints where literal, else None."""
+    depth, cur, out = 0, '', []
+    for ch in text[i + 1:]:
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            if depth == 0:
+                out.append(cur)
+                break
+            depth -= 1
+        if ch == ',' and depth == 0:
+            out.append(cur)
+            cur = ''
+        elif not (ch == ')' and depth == 0):
+            cur += ch
+    vals = []
+    for x in out[1:]:   # after c
+        x = x.strip()
+        try:
+            vals.append(int(x, 0))
+        except ValueError:
+            vals.append(None)
+    return vals
+
+
+def helper_regs(text):
+    """V registers the HELPERS calls in text touch, or None when one has a register argument that is not literal."""
+    out = set()
+    for m in HELPER_CALL.finditer(text):
+        a = _args(text, m.end(1))
+        try:
+            regs = HELPERS[m.group(1)]([x if x is not None else 0 for x in a])
+            need = HELPER_ARGS[m.group(1)]
+        except IndexError:
+            return None
+        if any(a[k] is None for k in need):
+            return None
+        out.update(regs)
+    return out
+
+
+HELPER_ARGS = {   # the argument positions HELPERS reads registers or counts from: they must be literal
+    'sl_gen': (3, 7, 10), 'sl_across': (4, 5), 'sv_fred_s': (1, 2), 'sv_tbl': (1, 3, 4, 5),
+    'sl_ldm': (2, 3, 4), 'sl_stm': (2, 3, 4), 'sl_lds': (1, 3), 'sl_sts': (1, 3), 'sl_ldr': (2, 3),
+}
 FORMS = {   # name -> the pattern of its literal-register occurrences (each group a register)
     'VREG': r'\bVREG\(\s*[^,()]+,\s*(\d+)\s*\)',
     'VQ': r'\bVQ\(\s*[^,()]+,\s*[^,()]+,\s*(\d+)\s*\)',
@@ -46,6 +108,10 @@ def refs(text):
     if CPU_ONLY.search(text):
         return None
     out = {int(m) for m in DIRECT.findall(text)}
+    h = helper_regs(text)
+    if h is None:
+        return None
+    out |= h
     if len(ANY_CV.findall(text)) != len(DIRECT.findall(text)):
         return None
     for k, rx in FORM_RE.items():
@@ -105,3 +171,18 @@ def plan(texts, succ, clean, spill_marker):
         if not seen[i]:
             dirty[i] = set(regs)
     return VPlan(sorted(regs), [dirty[i] | touched[i] if spill_marker in texts[i] else set() for i in range(n)])
+
+
+# Locals pay off only where calls are rare. x86-64 SysV has no callee-saved vector register, so around each call clang
+# keeps the live locals on the stack as well as syncing them with the Cpu. Static x86 of 191 functions of 7 hot chunks
+# (17/11/2026), all V in the Cpu against locals, by calls per V access in the emitted body: below 0.01 -24 % instructions
+# and -45 % memory operands, 0.010-0.015 -10 % / -22 %, 0.015-0.02 +11 % / +5 %, 0.02-0.03 +29 % / +35 %.
+CALL_DENSITY = float(os.environ.get('MKW_GEN_V_CALL_DENSITY', '0.015'))
+CALL_RE = re.compile(r'\b(?:f_[0-9a-f]+|rt_dispatch)\(c\);')
+VREF_RE = re.compile(r'\bVX\(|\bVREG\(|\bVS\w*\(|\bFP_SET\w\(|\bfp_op_\w\(|\bfp_fma_\w\(|\bVQ\(|\bVW\(|\bSV_FOP|\bsl_\w+\(|\bsv_\w+\(')
+
+
+def worth(decl, lines):
+    """Whether a function with V locals (its declaration and emitted lines) has calls rare enough for them to pay."""
+    text = decl + '\n'.join(lines)
+    return len(CALL_RE.findall(text)) <= CALL_DENSITY * max(1, len(VREF_RE.findall(text)))

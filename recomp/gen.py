@@ -597,15 +597,22 @@ class Emitter:
             # V registers in locals (recomp/vregs.py); not with patched sites, whose replacements it does not follow
             has_patch = any(entry + 4 * i in self.patched for i in range(n))
             vp = None if has_patch or not self.v_locals else vregs.plan(texts, succ, clean, regs.SPILL)
-            rp.vplan = vp
+            lines = None
+            if vp:
+                rp.vplan = vp
+                vbody = [(i, vregs.DIRECT.sub(r'VX(\1)', line)) for i, line in body]
+                lines = [line if i is None else rp.resolve(i, line) for i, line in vbody]
+                if not vregs.worth(vp.decl(), lines):   # calls too dense: the locals cost more than they save
+                    vp = rp.vplan = lines = None
+                    self.stats['v_dense_calls'] += 1
             if vp:
                 out.append('    ' + vp.decl())
-                body = [(i, vregs.DIRECT.sub(r'VX(\1)', line)) for i, line in body]
                 self.stats['local_v_functions'] += 1
                 self.stats['v_spills'] += sum(len(s) for s in vp.spill)
             else:
                 out.append('    u128 *const V = c->v; (void)V;')
-            out += [line if i is None else rp.resolve(i, line) for i, line in body]
+                lines = [line if i is None else rp.resolve(i, line) for i, line in body]
+            out += lines
         else:   # all_labels: fb_<entry> holds the body and declares V (above)
             out += [line for _, line in body]
         out.append('}')
