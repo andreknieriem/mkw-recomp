@@ -473,6 +473,43 @@ static _Thread_local uint64_t pd_t;
 _Thread_local uint64_t pd_tsc[PD_N], pd_n;
 #define PD_MARK(i) do { if (pd_on) { uint64_t t_ = plat_cycles(); pd_tsc[i] += t_ - pd_t; pd_t = t_; } } while (0)
 
+// MKW_PASS_DRAWS=1 (diagnosis, perf-deck): draws recorded per kind of pass (render area, layers, colour targets, depth),
+// logged every 300,000 draws: which passes a split-screen frame's ~11,000 draws go to (shadow maps, views, effects).
+#define PDC_N 64
+static struct { uint32_t w, h, layers, ncol, depth; uint64_t n; } pdc[PDC_N];
+static uint64_t pdc_total;
+static void pass_draw_count(const VkExec *ex) {
+    static int on = -1;
+    if (on < 0) { const char *e = cfg_get("MKW_PASS_DRAWS"); on = e && *e && strcmp(e, "0"); }
+    if (!on) return;
+    uint32_t ncol = 0;
+    for (int i = 0; i < ex->rt.n && i < 8; i++) ncol += ex->rt.color[i] != NULL;
+    uint32_t dep = ex->rt.depth != NULL;
+    int k = 0;
+    for (; k < PDC_N && pdc[k].n; k++)
+        if (pdc[k].w == ex->pass_w && pdc[k].h == ex->pass_h && pdc[k].layers == ex->pass_layers && pdc[k].ncol == ncol &&
+            pdc[k].depth == dep)
+            break;
+    if (k == PDC_N) k = PDC_N - 1;   // full: the last row takes the rest
+    if (!pdc[k].n) pdc[k].w = ex->pass_w, pdc[k].h = ex->pass_h, pdc[k].layers = ex->pass_layers, pdc[k].ncol = ncol, pdc[k].depth = dep;
+    pdc[k].n++;
+    if (++pdc_total % 300000) return;
+    char b[1500];
+    int o = snprintf(b, sizeof b, "perf: draws by pass over %llu draws:", (unsigned long long)pdc_total);
+    for (int r = 0; r < 14 && o < (int)sizeof b - 80; r++) {   // the largest first
+        int best = -1;
+        for (int i = 0; i < PDC_N && pdc[i].n; i++)
+            if (pdc[i].n != (uint64_t)-1 && (best < 0 || pdc[i].n > pdc[best].n)) best = i;
+        if (best < 0) break;
+        o += snprintf(b + o, sizeof b - (size_t)o, " %ux%u%s%s c%u%s %.1f%%;", pdc[best].w, pdc[best].h,
+                      pdc[best].layers > 1 ? "x" : "", pdc[best].layers > 1 ? "L" : "", pdc[best].ncol, pdc[best].depth ? "+d" : "",
+                      100.0 * (double)pdc[best].n / 300000.0);
+        pdc[best].n = (uint64_t)-1;
+    }
+    rt_log("%s", b);
+    memset(pdc, 0, sizeof pdc);
+}
+
 int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) {
     pd_on = (rt_trace & RT_TRACE_DRAW) != 0;
     if (pd_on) pd_t = plat_cycles(), pd_n++;
@@ -486,6 +523,20 @@ int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) 
                    k ? k[1] : 0, k ? k[2] : 0, k ? k[3] : 0);
         }
         return vk_exec_frame.skip[VK_SKIP_OFF]++, 0;
+    }
+    // MKW_SHADOW_DRAWS (perf-deck, default 1; 0: none, "ab"): draws into the cascaded shadow map (D16, 3 layers, no
+    // colour target) skipped, which its clear leaves empty: no shadows. mp4_pdraws (Steam Deck, 4 players): 22 % of the
+    // ~11,000 draws of a frame went there, 17 % with 2.
+    static int shadow_mode = -1;
+    if (shadow_mode < 0) {
+        shadow_mode = rt_knob("SHADOW_DRAWS", "1");
+        if (shadow_mode != 1) rt_log("vk_exec: draws into the shadow map %s (MKW_SHADOW_DRAWS)", shadow_mode == 2 ? "skipped in the A blocks" : "skipped");
+    }
+    if (shadow_mode != 1 && !(shadow_mode == 2 && rt_ab()) && ex->rt.depth && ex->rt.depth->d.format == 0x32 &&
+        ex->rt.depth->d.depth == 3) {
+        int ncol = 0;
+        for (int i = 0; i < ex->rt.n && i < 8; i++) ncol |= ex->rt.color[i] != NULL;
+        if (!ncol) return vk_exec_frame.skip[VK_SKIP_OFF]++, 0;
     }
     cb_res(ex);
     dummies_init();
@@ -633,6 +684,7 @@ int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) 
     vk_exec_oq_draw(ex);
     if (vk_pt_enabled() && vk_pt_draw_mode()) vk_pt_draw(ex->cb, s.vs, s.fs);
     if (vk_spec_census_on()) spec_census(ex, vs, NVN_STAGE_VS), spec_census(ex, fs, NVN_STAGE_FS);
+    pass_draw_count(ex);
     PD_MARK(PD_VB);
     return 1;
 }
