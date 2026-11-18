@@ -82,7 +82,7 @@ extern _Thread_local int pd_on DRAW_SHARED;            // MKW_TRACE=draw timing 
 // MKW_BIND_STATS counters (bind_stats).
 typedef struct {
     int on;
-    uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, same_prog, same_all, bind_skip, ubo_skip;
+    uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, same_prog, same_all, bind_skip, ubo_skip, ubo_partial;
     uint64_t miss[8];   // graphics builds not skipped, by the first input of bind_sig that differed (bind_stats)
 } DrawBS;
 extern _Thread_local DrawBS BS DRAW_SHARED;

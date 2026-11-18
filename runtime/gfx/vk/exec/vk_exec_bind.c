@@ -470,7 +470,8 @@ static void bind_stats(const VkPipeInfo *info) {
                "same program and state as the draw before %.3f, also same buffers %.3f; descriptor builds skipped %.3f",
                BS.push / d, BS.push_skip / d, BS.set_new / d, BS.set_reuse / d, BS.same_prog / d,
                BS.same_all / d, BS.bind_skip / d);
-        rt_log("vk_exec: per draw: rebinds with new uniform block offsets only %.3f (MKW_UBO_SKIP)", BS.ubo_skip / d);
+        rt_log("vk_exec: per draw: rebinds with new uniform block offsets only %.3f (MKW_UBO_SKIP), builds of the uniform "
+               "blocks alone %.3f (MKW_UBO_PARTIAL)", BS.ubo_skip / d, BS.ubo_partial / d);
         rt_log("vk_exec: per draw, builds not skipped by the first input that differed: pipeline %.3f, program %.3f, "
                "texture slots or epoch %.3f, samplers or feedback count %.3f, memory or uniform snapshot generation %.3f, "
                "feedback images, support, base instance or uniform-read addresses %.3f, bound slots %.3f, only user "
@@ -682,6 +683,7 @@ static _Thread_local int br_on;
 
 typedef struct { VkWriteDescriptorSet w[MAX_BINDINGS]; VkDescSlot d[MAX_DESC]; VkBufferView bv[MAX_DESC]; } DrawBRA;
 static _Thread_local DrawBRA *dtl_bra;
+static _Thread_local struct { const VkPipeInfo *info; } PB;   // MKW_UBO_PARTIAL: the info whose descriptors d holds
 #define BRA (*dtl_bra)
 
 typedef struct { const VkPipeInfo *info; uint32_t s; const VkDescSlot *d; VkWriteDescriptorSet *w; uint32_t i0, i1; } DcWrite;
@@ -836,7 +838,7 @@ void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     if (info->n_bindings > MAX_BINDINGS) rt_fatal("vk: %u descriptor bindings exceed the replay's %d", info->n_bindings, MAX_BINDINGS);
     bind_stats(info);
     int gfx = info->bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS;
-    int skip = gfx ? bind_skip_on() : 0, same = 0, was_valid = B.res_valid;
+    int skip = gfx ? bind_skip_on() : 0, same = 0, was_valid = B.res_valid, partial = 0;
     if (skip) {
         same = bind_sig(ex, info);
         if (!same && bind_stats_on() && RS.why >= 0) BS.miss[RS.why]++;
@@ -852,10 +854,20 @@ void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             ex->recorded++;
             return;
         }
+        // MKW_UBO_PARTIAL (perf-deck, default 1; "ab"): a draw whose inputs differ from the previous graphics build's
+        // only in its user uniform blocks' bindings (RS.why 7) resolves just those descriptors (ubo_info) and keeps
+        // the rest of the packed array that build left (textures, storage, c0, support: inputs the signature found
+        // equal). mp4_dc0 (Steam Deck, 4 players): 38.7 % of the draws, textures alone 0.57 us a draw. Needs the
+        // last build of this thread to be a whole graphics one of the same pipeline info (PB) in this command buffer
+        // (was_valid), with write templates (no write structs to fill).
+        static int upm = -1;
+        if (upm < 0) upm = rt_knob("UBO_PARTIAL", "1");
+        partial = !same && RS.why == 7 && was_valid && skip == 1 && PB.info == info && RT_KNOB_ON(upm);
         B.res_valid = 0;   // until the build below ends
         if (skip == 2) memcpy(RS.pcnt, RS.cnt, sizeof RS.cnt), RS.pncnt = RS.ncnt;
         RS.rec = 1, RS.ncnt = 0, RS.cnt_over = 0, RS.volatile_ = 0, RS.cmds = 0;
     }
+    PB.info = NULL;   // set again below once a whole graphics build is in d
     int xb = gfx ? xb_mode() : 0;
     uint64_t xkey = 0;
     const VkDescSlot *xhad = NULL;
@@ -876,6 +888,30 @@ void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         lo[s] = i0, hi[s] = i1, i0 = i1;
         if (i1 > lo[s] && !info->tpl[s]) need_w = 1;
     }
+    if (need_w || xb || ru_cap) partial = 0;
+    if (partial) BS.ubo_partial++;
+    // MKW_UBO_PARTIAL_CHECK=1 (diagnosis): a partial build is done in a copy, then the whole build as before, and the
+    // two compared: a difference stops the run with the binding.
+    static _Thread_local VkDescSlot upc[MAX_DESC];
+    static int upc_on = -1;
+    if (upc_on < 0) { const char *e = cfg_get("MKW_UBO_PARTIAL_CHECK"); upc_on = e && *e && strcmp(e, "0"); }
+    int upc_now = 0;
+    if (partial && upc_on) {
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < info->n_bindings; i++) n += info->bindings[i].count ? info->bindings[i].count : 1;
+        memcpy(upc, d, sizeof *d * n);
+        for (uint32_t i = 0, at = 0; i < info->n_bindings; i++) {
+            const VkPipeBinding *b = &info->bindings[i];
+            uint32_t cnt = b->count ? b->count : 1;
+            if (b->kind == GFX_RES_UBO)
+                for (uint32_t k = 0; k < cnt; k++) {
+                    int slot = b->res->slot + (int)k;
+                    if (slot >= 3 && slot - 3 < 18) upc[at + k].buffer = ubo_info(ex, nvn_stage_of(b->stage), slot);
+                }
+            at += cnt;
+        }
+        partial = 0, upc_now = 1;
+    }
     uint32_t nd = 0;
     for (uint32_t i = 0; i < info->n_bindings; i++) {
         const VkPipeBinding *b = &info->bindings[i];
@@ -886,6 +922,15 @@ void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         VkDescSlot *o = &d[nd];
         int st = nvn_stage_of(b->stage), kind = 0;   // kind: 0 buffer, 1 image, 2 texel buffer view
         if (xkey) memset(xkeep + nd, 0, cnt);
+        if (partial) {   // only the user uniform blocks (slots 3-20), the rest is the last build's
+            if (b->kind == GFX_RES_UBO)
+                for (uint32_t k = 0; k < cnt; k++) {
+                    int slot = r->slot + (int)k;
+                    if (slot >= 3 && slot - 3 < 18) o[k].buffer = ubo_info(ex, st, slot);
+                }
+            nd += cnt;
+            continue;
+        }
         if (b->kind == VK_PIPE_SUPPORT) {
             o->buffer = support_info(ex);
             if (ru_cap) ru_note_desc(nd, RUK_SUP, 0, 0);
@@ -943,6 +988,20 @@ void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         }
         nd += cnt;
     }
+    if (upc_now)
+        for (uint32_t i = 0, at = 0; i < info->n_bindings; i++) {
+            const VkPipeBinding *b = &info->bindings[i];
+            uint32_t cnt = b->count ? b->count : 1;
+            for (uint32_t k = 0; k < cnt; k++)
+                if (memcmp(&upc[at + k], &d[at + k], sizeof *d))
+                    rt_fatal("vk_exec: MKW_UBO_PARTIAL_CHECK: program %llu binding %u[%u] kind %d slot %d differs: "
+                             "%#llx %#llx %#llx against %#llx %#llx %#llx", (unsigned long long)ex->prog->serial,
+                             (unsigned)b->binding, (unsigned)k, (int)b->kind, b->res ? b->res->slot : -1,
+                             (unsigned long long)upc[at + k].w[0], (unsigned long long)upc[at + k].w[1],
+                             (unsigned long long)upc[at + k].w[2], (unsigned long long)d[at + k].w[0],
+                             (unsigned long long)d[at + k].w[1], (unsigned long long)d[at + k].w[2]);
+            at += cnt;
+        }
     if (n_sets == 2 && lo[1] == info->n_bindings) d0[1] = nd;   // set 1 empty: set 0 runs to the end (run42: its size was 0)
     // A null handle where the descriptor type needs one makes the driver read through NULL (RADV 26.2 inside
     // vkCmdPushDescriptorSetWithTemplateKHR, run39/run40): stop with the binding instead.
@@ -1072,6 +1131,7 @@ void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         }
         B.res_valid = valid;
     }
+    if (gfx && skip == 1) PB.info = info;   // d holds this pipeline's whole set of descriptors
     BR_MARK(BR_SETS);
     ex->recorded++;
 }
