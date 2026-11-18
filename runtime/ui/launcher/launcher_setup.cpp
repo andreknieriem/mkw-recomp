@@ -17,6 +17,12 @@ extern const char rt_port_version[];
 static const char *const kSteps[SETUP_STEPS] = {"check", "exefs", "romfs", "generate", "compile", "shaders", "warm",
                                                "cleanup"};
 
+int setup_step_index(const char *name) {
+    for (int i = 0; name && i < SETUP_STEPS; i++)
+        if (!strcmp(name, kSteps[i])) return i;
+    return -1;
+}
+
 static SDL_Mutex *g_lock;
 static SetupState g_state = {0, -1, {}, 0, 0, 0, {}, {}};
 static SDL_Process *g_proc;
@@ -122,7 +128,8 @@ void setup_start(const char *exe_dir, const char *game_dir, const char *source, 
     if (setup_state().running) return;
     char python[1200], script[1200];
     SDL_LockMutex(g_lock);
-    g_state = SetupState{1, -1, {}, 0, 0, 0, {}, {}};
+    unsigned generation = g_state.generation + 1;
+    g_state = SetupState{1, -1, {}, 0, 0, 0, {}, {}, generation};
     SDL_UnlockMutex(g_lock);
     if (!find_tool(exe_dir, "prepare/prepare.py", python, script, sizeof python)) {
         set_finished(-1, "no_setup", "");

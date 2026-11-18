@@ -656,7 +656,7 @@ void gkey_fill(const VkPipeState *s, GKey *k) {
     k->dsb = s->fs && P.f_dual_src && uses_src1(s);
     k->fbl = s->fs ? s->feedback : 0;
     if (s->fs && s->color.alpha_func && s->color.alpha_func != NVN_ALPHA_FUNC_ALWAYS)
-        k->alpha_func = (uint8_t)(s->color.alpha_func - NVN_ALPHA_FUNC_NEVER + VK_COMPARE_OP_NEVER + 1), k->alpha_ref = s->alpha_ref;
+        k->alpha_func = (uint8_t)(s->color.alpha_func - NVN_ALPHA_FUNC_NEVER + VK_COMPARE_OP_NEVER + 1);
     if (!P.dyn_clamp) k->clamp = s->depth_clamp && P.f_depth_clamp;
     if (!P.dyn_poly) k->poly_mode = (uint8_t)polygon_mode(s->poly.mode);
     if (!P.dyn_a2c) k->a2c = s->ms.a2c != 0;
@@ -979,7 +979,7 @@ VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Layout *l,
         }
         if (k->alpha_func && fcode) {
             uint64_t n2 = 0;
-            uint32_t *d = spirv_alpha_test(fcode, fw, k->alpha_func - 1, k->alpha_ref, &n2);
+            uint32_t *d = spirv_alpha_test(fcode, fw, k->alpha_func - 1, &n2);
             if (d) free(fpatched), fcode = fpatched = d, fw = n2;
             else LOG_ONCE("vk_pipeline: alpha test on a fragment shader without a float vec4 colour output 0");
         }
@@ -1256,6 +1256,7 @@ static void autosave_once(void) {
 // On its own thread: the save (vkGetPipelineCacheData and the file write, about 60 ms) and the key appends (a flush to
 // the disk each) ran on the present thread, and the render thread waited for it to take the next frame.
 static void autosave_main(void *arg) {
+    plat_thread_background();   // off the frame's fast cores (MKW_FAST_CORES)
     (void)arg;
     plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
     for (;;) {

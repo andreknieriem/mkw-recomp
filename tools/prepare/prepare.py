@@ -15,7 +15,8 @@ Steps, into --game (by default the folder of mkw / mkw.exe):
   compile   that C with the package's zig (or clang) into mkwgame.so / mkwgame.dll
   shaders   the SM86 spec built here from NVIDIA's nvdisasm (sm86/spec/spec.py, into sm86/; never shipped), then
             tools/shaders/extract.py and translate.py into spirv/
-  warm      the game run once for a minute: the driver's pipeline cache and the pipeline keys for the first start
+  warm      mkw --prewarm, without the game: the shader libraries of every program pair of the copy into the driver's
+            pipeline cache for the first start
   cleanup   setup-work removed but its obj/ and zig-cache/: the next update compiles only the chunks whose C changed
             (gamecode.py), and zig does not build its libc again
 
@@ -26,13 +27,15 @@ linked (the runtime reads its RomFS in place).
 Output: one event per line on stdout, for the start screen: "step <name>", "progress <done> <total>", "skip <name>",
 "done", "error <code> <detail>". Exit codes: 0 done, 1 failed, 2 bad command line. The start screen shows its own
 translated text per code with the detail inside: source (no earlier setup to repeat), moved (the last setup's folder,
-gone: moved or renamed, #188), nogame (the folder, without exefs/main and romfs/), encrypted (exefs/main, not an NSO), version (main's build id), romfs (its file count), failed
+gone: moved or renamed, #188; a copy's game folder stands in for it, #501), nogame (the folder, without exefs/main and romfs/), encrypted (exefs/main, not an NSO), version (main's build id), romfs (its file count), failed
 (a tool's English message) and io (the system's); logs/setup.log gets the English message whole.
 
 Usage: python prepare.py --source DIR|FILE.nup --game DIR [--runtime DIR] [--romfs copy|link] [--jobs N]
-                         [--target linux|windows]
+                         [--target linux|windows] [--next --port VER]
 Without --source (the launcher after an update, tools/prepare/update.py): the copy and the RomFS mode of the last
 setup in --game, from its setup-state.json; only the steps whose key changed run again.
+--next (an update while the player keeps playing): the outputs the game reads go to <game>/setup-next/ and warm and
+cleanup wait; the next run without --next of that --port version moves them into place first (nextsetup.py).
 """
 
 import faulthandler
@@ -73,7 +76,7 @@ import game_texts  # (build_all: the game's texts in ca, gl, eu)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gamecode import DamagedSource, compile_game
 from gamesource import check, is_nx, loose_romfs, unpack
-from gamecopy import clear_dir, copy_tree, remove_stale
+from gamecopy import BUILD_BYTES, check_space, clear_dir, copy_tree, own_dir, remove_stale, romfs_bytes, tree_bytes
 from nup import Nup
 from machine import (
     ZIG_CACHE,
@@ -81,13 +84,15 @@ from machine import (
     default_cc,
     default_glslc,
     emit,
+    hold_lock,
     mem_available_gb,
     mem_gb,
     own_children,
     run,
     shader_jobs,
 )
-from shaderstep import shaders, spec_command, translator_key  # noqa: F401  (spec_command: tests/test_setup.py)
+import nextsetup
+from shaderstep import shaders, spec_command, translator_key  # noqa: F401  (spec_command: tests/launcher/test_setup.py)
 import update  # (ca_file)
 
 PREP_VERSION = 1  # bump when a step's output changes meaning: every step runs again
@@ -96,7 +101,7 @@ from versions import Version
 
 SHADER_DIRS = ("Effect", "Layout", "Lib")  # extract.py's SHADER_DIRS: with Shader/, the RomFS folders it reads
 STEPS = ("check", "exefs", "romfs", "generate", "compile", "shaders", "warm", "cleanup")
-WARM_SECONDS = 60  # the driver cache is saved every 20 s and the pipeline keys every 2 (vk_pipeline.c, vk_pipe_keys.c)
+WARM_TIMEOUT = 1800  # mkw --prewarm: ~10 000 shader libraries compiled cold on every core
 
 
 def ini_set(ini: Path, key: str, value: str) -> None:
@@ -189,25 +194,26 @@ COMPILER = [*GENERATOR, ROOT / "tools/build/build.py", Path(__file__).with_name(
 
 
 def warm(game: Path, work: Path, runtime: Path | None = None) -> None:
-    """The game run once to its title, so the first real start finds pipeline-cache.bin and pipeline-keys.bin. Its
-    saves go to a scratch profile: the player's first start stays a first start. The window opens without taking focus
-    and without sound; the run is ended after WARM_SECONDS. Its log is logs/warm.log: in mkw.log it pushed the player's
-    last run out of the file reports attach and the start screen reads (#437, 16/11/2026)."""
+    """mkw --prewarm, without the game: the shader libraries of every program pair of the copy (pipeline-pairs.bin,
+    from the shaders step) compiled into the driver's caches and pipeline-cache.bin, so the first start only loads
+    them (runtime/gfx/vk/pipe/vk_pipe_pairs.c). Until 17/11/2026 this ran the game for a minute and kept the keys of
+    what its title drew; a new place still drew with libraries compiling. Its log is logs/warm.log (#437: in mkw.log
+    it pushed the player's last run out of the file reports attach). A driver that crashes or hangs here does not fail
+    the setup: the prewarm's mark (pipeline-keys.prewarm) then skips it at every start on that GPU and driver, and the
+    game builds its pipelines as it draws, as before."""
     exe = (runtime or game) / ("mkw.exe" if os.name == "nt" else "mkw")
-    env = dict(os.environ, MKW_LAUNCHED="1", MKW_ASSUME_FOCUS="1", MKW_AUDIO="none", MKW_LOG_NAME="warm",
-               MKW_GAME_DIR=str(game), MKW_PROFILE_DIR=str(work / "warm-profile"))  # fmt: skip
-    p = subprocess.Popen([str(exe)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for t in range(WARM_SECONDS):
-        if p.poll() is not None:
-            raise Failed(f"the game stopped while warming up (exit {p.returncode}); its log is {game / 'logs/warm.log'}")
-        emit("progress", t, WARM_SECONDS)
-        time.sleep(1)
-    p.terminate()
+    env = dict(os.environ, MKW_LOG_NAME="warm", MKW_GAME_DIR=str(game))
+    emit("progress", 0, 1)
     try:
-        p.wait(10)
+        p = subprocess.run([str(exe), "--prewarm"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=WARM_TIMEOUT, check=False)  # fmt: skip
     except subprocess.TimeoutExpired:
-        p.kill()
-    emit("progress", WARM_SECONDS, WARM_SECONDS)
+        print(f"warm: the pipeline prewarm took over {WARM_TIMEOUT} s; left to the game", file=sys.stderr)
+    else:
+        if p.returncode:
+            print(f"warm: the pipeline prewarm failed (exit {p.returncode}, {game / 'logs/warm.log'}); left to the game",
+                  file=sys.stderr)  # fmt: skip
+    emit("progress", 1, 1)
 
 
 def load_state(game: Path) -> dict:
@@ -245,6 +251,11 @@ def main() -> None:
     ap.add_argument("--glslc", help="(default: the package's, else glslc on PATH)")
     ap.add_argument("--target", choices=("linux", "windows"), default="windows" if os.name == "nt" else "linux")
     ap.add_argument(
+        "--next",
+        action="store_true",
+        help="an update set up beside the played version, in setup-next/ (no warm step): its next run swaps it in",
+    )
+    ap.add_argument(
         "--port", default="", help="the port version this setup is for (the start screen's): kept in the state"
     )
     args = ap.parse_args()
@@ -255,7 +266,15 @@ def main() -> None:
     # directory limit, making warm-up reject the very installation this setup just built.
     game = args.game.absolute()
     runtime = args.runtime.resolve() if args.runtime else game
+    lock = hold_lock(game)  # noqa: F841 (held until exit)
+    if args.next:  # the player may be racing meanwhile: the game's threads go first; the tools inherit it
+        nextsetup.lower_priority()
+    else:  # the update an earlier --next run set up beside the played version, now that this one runs
+        nextsetup.promote(game, args.port)
     state = load_state(game)
+    dest = game  # where the outputs the game reads, and the state, are written
+    if args.next:  # beside the played version's, the state with them (nextsetup.py)
+        state, dest = nextsetup.load(game, state), nextsetup.next_dir(game)
     if not args.source:  # the last setup's; before 0.1.5 the state kept them only in its keys
         done_exefs = Path(state["done"]["exefs"]) if "exefs" in state["done"] else None
         last = state.get("source") or (
@@ -265,10 +284,16 @@ def main() -> None:
             emit("error", "source", "no earlier setup in this folder")
             sys.exit(2)
         args.source = Path(last)
-        if not args.source.exists():
-            emit("error", "moved", last)
-            sys.exit(1)
         args.romfs = args.romfs or state.get("romfs_mode") or state["done"].get("romfs", "copy").split(" ", 1)[0]
+        if not args.source.exists():
+            # a copy keeps the whole game in this folder: once the player deleted the original files, this folder is
+            # the source (#501: "choose it again" was impossible after an update, and choosing the game folder worked)
+            if args.romfs == "copy" and (game / "exefs/main").is_file() and own_dir(game / "romfs", Path(last)):
+                print(f"setup: {last} is gone; the copy in {game} is the source", file=sys.stderr)
+                args.source = game
+            else:
+                emit("error", "moved", last)
+                sys.exit(1)
     args.romfs = args.romfs or "copy"
     src = args.source.resolve()
     state["source"], state["romfs_mode"] = str(src), args.romfs
@@ -289,7 +314,9 @@ def main() -> None:
     # system; on Linux MemAvailable counts the reclaimable cache, and it lowers the jobs only when less than 60 % of the
     # RAM is available (not measured on Linux).
     free = mem_available_gb()
-    budget = min(mem_gb() * 0.6, free)
+    # --next: the game may start while this runs, and low priority leaves it the CPU but not the memory; half of it
+    share = 0.5 if args.next else 1.0
+    budget = min(mem_gb() * 0.6, free) * share
 
     def fit(gb: float) -> int:
         return args.jobs or max(1, min(os.cpu_count() or 1, int(budget / gb)))
@@ -324,7 +351,9 @@ def main() -> None:
             "generate": f"{build.game_id()} {version.name} {code_key(GENERATOR)}{with_mods}",
             "compile": f"{build.game_id()} {version.name} {args.target} {code_key(COMPILER)}{with_mods}",
             "shaders": f"{version.name} {translator_key()}",
-            "warm": f"{build.game_id()} {version.name}",
+            # with the shaders' key: the prewarm builds the libraries of this SPIR-V (an update that changed only the
+            # translator skipped it and left the new libraries to the first start)
+            "warm": f"{build.game_id()} {version.name} {translator_key()}",
         }
         migrate_keys(state, keys, {
             "romfs": f"{args.romfs} {romfs_src}",
@@ -335,20 +364,32 @@ def main() -> None:
         })  # fmt: skip
         regenerate_if_cleaned(state, keys, work)
         redo_exefs_if_missing(state, game)
+        # The room the steps to come take: the RomFS copy less what a cut one left, and the game's build the first
+        # time (an update writes over its files instead of beside them)
+        need = 0
+        if "romfs" in STEPS and args.romfs == "copy" and state["done"].get("romfs") != keys["romfs"]:
+            need += max(romfs_bytes(romfs_src) - tree_bytes(romfs), 0)
+        if "compile" in STEPS and "compile" not in state["done"]:
+            need += BUILD_BYTES
+        check_space(game, need)
+        if args.next:
+            nextsetup.seed(game)
         for step in STEPS[1:]:
+            if args.next and step in ("warm", "cleanup"):  # after the swap, by the new version's own run
+                continue
             # The start screen sets up again when its version differs (launcher.cpp): an update by hand (a new
             # AppImage or zip over the old) kept the old steps (#50: 0.1.8 played with 0.1.7's shaders). Kept once the
             # game is built, before the optional warm-up: a warm-up that keeps failing (#50's hang) must not repeat
             # the setup at every start.
             if step == "warm" and args.port:
                 state["port"] = args.port
-                save_state(game, state)
+                save_state(dest, state)
             key = keys.get(step, "")
             if step != "cleanup" and state["done"].get(step) == key:
                 emit("skip", step)
                 continue
             emit("step", step)
-            t_step = time.monotonic()
+            t_step, c_step = time.monotonic(), os.times()
             if step == "exefs":
                 if is_nx(exefs_src):
                     clear_dir(game / "exefs", exefs_src)
@@ -379,17 +420,17 @@ def main() -> None:
                 generate(game / "exefs", work, gen_jobs, version, image)
             elif step == "compile":
                 try:
-                    compile_game(game, game / "exefs", work, cc, args.target, jobs)
+                    compile_game(game, game / "exefs", work, cc, args.target, jobs, dest)
                 except DamagedSource as e:  # once: a second damaged write is the disk or the memory, not chance
                     print(f"{e}: generating again", file=sys.stderr)
                     emit("step", "generate")
                     generate(game / "exefs", work, gen_jobs, version, image)
                     emit("step", "compile")
-                    compile_game(game, game / "exefs", work, cc, args.target, jobs)
+                    compile_game(game, game / "exefs", work, cc, args.target, jobs, dest)
             elif step == "shaders":
                 # extract.py reads a .nup itself; a .nx's shader archives are unpacked first
                 src_romfs = loose_romfs(runtime, romfs, work, "Shader", *SHADER_DIRS) if is_nx(romfs) else romfs
-                shaders(game / "exefs", src_romfs, game, work, glslc, args.jobs or shader_jobs(), cc)
+                shaders(game / "exefs", src_romfs, game, work, glslc, args.jobs or shader_jobs(share), cc, dest)
             elif step == "warm":
                 warm(game, work, runtime)
             elif step == "cleanup":
@@ -401,9 +442,14 @@ def main() -> None:
                 game_texts.build_all(game, loose_romfs(runtime, romfs, work, "Mals"))
                 shutil.rmtree(work / "pack", ignore_errors=True)
             state["done"][step] = key
-            save_state(game, state)
-            print(f"time: {step} {time.monotonic() - t_step:.1f} s", file=sys.stderr)
+            save_state(dest, state)
+            c = os.times()  # the CPU of its tools (0 on Windows): whether a step leaves cores idle (H1, build/updates)
+            cpu = c.children_user + c.children_system - c_step.children_user - c_step.children_system
+            print(f"time: {step} {time.monotonic() - t_step:.1f} s, cpu {cpu:.1f} s", file=sys.stderr)
         print(f"time: setup {time.monotonic() - t_all:.1f} s", file=sys.stderr)
+        if args.next:  # finished: the next start of the new version moves it into place (nextsetup.promote)
+            state["port"], state["ready"] = args.port, True
+            save_state(dest, state)
         emit("done")
     except Failed as e:
         print(f"time: {step} failed after {time.monotonic() - t_step:.1f} s", file=sys.stderr)

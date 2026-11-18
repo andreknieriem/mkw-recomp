@@ -56,7 +56,11 @@ def spec_command(game: Path, work: Path, cc: list[str], crt: Path | None) -> lis
             str(work / "nvidia"), "--cc", json.dumps(cc), *(["--crt", str(crt)] if crt else [])]  # fmt: skip
 
 
-def shaders(exefs: Path, romfs: Path, game: Path, work: Path, glslc: str, jobs: int, cc: list[str]) -> None:
+def shaders(
+    exefs: Path, romfs: Path, game: Path, work: Path, glslc: str, jobs: int, cc: list[str], dest: Path | None = None
+) -> None:
+    """spirv/ and pipeline-pairs.bin into dest (default the game folder; prepare.py --next: setup-next/)."""
+    dest = dest or game
     spec = sm86_spec(game, work, cc)
     sh = work / "shaders"
     run([sys.executable, str(ROOT / "tools/shaders/extract.py"), "--romfs", str(romfs), "--exefs", str(exefs),
@@ -64,7 +68,7 @@ def shaders(exefs: Path, romfs: Path, game: Path, work: Path, glslc: str, jobs: 
     while True:
         try:
             run([sys.executable, str(ROOT / "tools/shaders/translate.py"), "--shaders", str(sh),
-                 "--out", str(game / "spirv"), "--glslc", glslc, "--no-validate", "--progress", "--jobs", str(jobs),
+                 "--out", str(dest / "spirv"), "--glslc", glslc, "--no-validate", "--progress", "--jobs", str(jobs),
                  "--spec", str(spec)], env=tool_env(glslc), progress_prefix="progress")  # fmt: skip
             break
         except Failed as e:
@@ -74,5 +78,8 @@ def shaders(exefs: Path, romfs: Path, game: Path, work: Path, glslc: str, jobs: 
                 raise
             jobs = max(1, jobs // 2)
             print(f"shaders: a worker ended abruptly, again with {jobs} workers", file=sys.stderr)
-    for p in (game / "spirv").glob("*.glsl"):  # the runtime reads .spv and .res.json; the GLSL only made them
+    for p in (dest / "spirv").glob("*.glsl"):  # the runtime reads .spv and .res.json; the GLSL only made them
         p.unlink()
+    # every program pair of the copy, for the boot's shader library prewarm (runtime/gfx/vk/pipe/vk_pipe_pairs.c)
+    run([sys.executable, str(ROOT / "tools/shaders/pipeline_pairs.py"), "--shaders", str(sh),
+         "--out", str(dest / "pipeline-pairs.bin")])  # fmt: skip

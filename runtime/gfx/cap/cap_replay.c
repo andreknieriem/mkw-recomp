@@ -102,6 +102,9 @@ int cap_replay_main(int argc, char **argv) {
     env_default("MKW_REPLAY_PAR_WARM", "0");   // chunks from the first submission (vk_exec_par.c)
     env_default("MKW_BACKGROUND_WINDOW", "hidden");   // a replay shows no window: its images are read back
     vk_pipeline_async_enable();   // MKW_PIPE_SYNC=0: background builds and the draws' waits, as in the game
+    // MKW_REPLAY_PREWARM=1 (diagnosis): the boot's prewarm first (pipeline-pairs.bin, pipeline-keys.bin), to count with
+    // MKW_PIPE_SYNC=0 the draws that still find shader libraries missing (the "gpl:" line at the end)
+    if (getenv("MKW_REPLAY_PREWARM") && strcmp(getenv("MKW_REPLAY_PREWARM"), "0")) vk_pipeline_prewarm();
     const char *par = getenv("MKW_REPLAY_PAR");
     if (!tag) tag = par && strcmp(par, "0") ? "par" : "serial";
     char path[1024], out_default[1024];
@@ -228,7 +231,7 @@ int cap_replay_main(int argc, char **argv) {
                 cap_in_read(in, rec, hd[0]);
                 cap_in_read(in, offs, 4 * hd[1]);
                 // MKW_CAP_RECS=<dir> (a measurement): recordings over 64 KiB saved there as they are in the capture, to
-                // compare one frame's ops with the next (tools/analisis/recdiff.py).
+                // compare one frame's ops with the next (tools/analisis/nvn/recdiff.py).
                 const char *rd = cfg_get("MKW_CAP_RECS");
                 if (rd && hd[0] > (64u << 10)) {
                     char rp[1024];
@@ -372,6 +375,7 @@ int cap_replay_main(int argc, char **argv) {
     vk_mem_replay_log(presents);    // mirror and shadow traffic per presented frame (MKW_MEMORY=mirror)
     long errors = vk_validation_errors_total();
     vk_exec_par_log();   // how many submissions went in chunks: a replay that never chunks compares serial with serial
+    if (getenv("MKW_REPLAY_PREWARM") && strcmp(getenv("MKW_REPLAY_PREWARM"), "0")) vk_pipeline_save();   // its "gpl:" line
     static const char *const names[] = {"", "meta", "mem", "zero", "pool init", "pool fini", "mapv", "texreg", "sampreg",
                                         "texrel", "progrel", "submit", "present", "wtex", "gwritten", "finish", "frame",
                                         "end", "gpumem", "sparse", "wimg"};

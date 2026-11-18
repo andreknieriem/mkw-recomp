@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <malloc.h>
 #include <linux/fs.h>
 #include <linux/futex.h>
 #include <linux/userfaultfd.h>
@@ -551,6 +552,8 @@ void plat_process_memory(uint64_t *resident, uint64_t *private_bytes) {
     }
     fclose(f);
 }
+
+void plat_heap_trim(void) { malloc_trim(0); }
 
 
 // CPU time (user + system) of this process's threads with that name (/proc/self/task/*/comm), summed; -1 when none.
