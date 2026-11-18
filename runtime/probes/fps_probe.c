@@ -130,6 +130,33 @@ int probe_fps(void) {
     iv = feed(&a, 200.0, 5.0, 300, &changes);   // 60 s
     expect("45 ms, then 200 ms frames for 60 s", iv, 4, changes, 1);
 
+    // dk20 (Steam Deck, race at interval 3): the game's measure follows the interval, at 20 fps the CPU and GPU idle
+    // half the frame at lower clocks and frames measure ~35 ms, at 30 fps they measure ~27 ms and hold. The down rule
+    // (28.3 ms) never left 3; the probe goes to 2 and stays.
+    fps_auto_reset(&a);
+    changes = 0;
+    for (int i = 0; i < 1800; i++) {   // 30 s, from interval 3
+        if (i == 0) a.iv = 3;
+        int prev = a.iv;
+        double m = (prev >= 3 ? 35.0 : 27.0) + (i & 1 ? 1.5 : -1.5);
+        if (fps_auto_step(&a, m, real_of(m, prev)) != prev) changes++;
+    }
+    expect("Steam Deck: 35 ms at 20 fps, 27 ms at 30 fps", a.iv, 2, changes, 1);
+
+    // fan_auto (Steam Deck GP, working fan): at 30 fps the game measures 31-41 ms, the real period holds 33.3 ms with a
+    // 50 ms frame now and then (fixed 30 ran at 0.99x). From 20 fps the probe goes to 30 and it stays there.
+    fps_auto_reset(&a);
+    changes = 0;
+    static const double deck30[] = {33, 36, 31, 38, 35, 41, 34, 37, 32, 39, 35, 36};
+    for (int i = 0; i < 3600; i++) {   // 60 s, from interval 3
+        if (i == 0) a.iv = 3;
+        int prev = a.iv;
+        double m = prev >= 3 ? 35.0 + (i & 1 ? 1.5 : -1.5) : deck30[i % 12];
+        double r = prev >= 3 ? 50.0 : i % 15 ? 1000.0 / 30 : 50.0;
+        if (fps_auto_step(&a, m, r) != prev) changes++;
+    }
+    expect("Steam Deck: 31-41 ms measured at 30 fps", a.iv, 2, changes, 1);
+
     printf("fps: %s\n", fails ? "FAILED" : "all passed");
     return fails ? 1 : 0;
 }

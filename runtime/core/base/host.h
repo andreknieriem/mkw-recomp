@@ -325,9 +325,10 @@ int frame_present_interval(void);   // the interval of the game's last present (
 #define FPS_AUTO_MAX 4
 #define FPS_AUTO_HIST 120
 typedef struct {
-    double hist[FPS_AUTO_HIST], real[8];
+    double hist[FPS_AUTO_HIST], real[8], rhist[FPS_AUTO_HIST];   // rhist: real periods (fps_auto.c)
     unsigned head, n, since, n_real, hold, hold_s;
     int iv, downed;
+    unsigned probes;   // steps down the probe rule made (fps_auto.c)
     double stall_ms;   // how long the frames have been slower than any interval holds (fps_auto.c)
     int fits;          // the last frames before it fitted the interval
 } FpsAuto;
