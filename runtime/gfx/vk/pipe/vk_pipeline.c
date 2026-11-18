@@ -1245,7 +1245,15 @@ static void autosave_once(void) {
     if (!P.ready) return;
     uint64_t now = plat_now_ms();
     if (*(volatile uint32_t *)&K.pend_n && now - last_keys >= 2000) last_keys = now, keys_flush();
-    if (now - last_ms < 20000) return;
+    // MKW_PIPE_AUTOSAVE_S (perf-deck, default 20; 0 = never while running): each save copies the whole driver cache
+    // (92 MB on the Deck after a few races) under the driver's cache lock and writes it out, ~1 s hitches there.
+    static int64_t ivl = -1;
+    if (ivl < 0) {
+        const char *e = cfg_get("MKW_PIPE_AUTOSAVE_S");
+        ivl = e && *e ? (int64_t)atoi(e) * 1000 : 20000;
+        if (ivl != 20000) rt_log("vk_pipeline: autosave %s (MKW_PIPE_AUTOSAVE_S)", ivl > 0 ? e : "off while running");
+    }
+    if (ivl <= 0 || now - last_ms < (uint64_t)ivl) return;
     VkPipeStats s;
     vk_pipeline_stats(&s);
     if (s.graphics + s.compute == last_n) return;
