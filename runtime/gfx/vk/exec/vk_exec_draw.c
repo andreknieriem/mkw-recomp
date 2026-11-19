@@ -548,11 +548,17 @@ int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) 
         is_shadow = !ncol;
     }
     static uint64_t sh_frame, sh_hist[10], sh_frames;
-    static int sh_runs, sh_prev_runs, sh_was, sh_nmaps, sh_prev_maps;
+    static int sh_runs, sh_was, sh_nmaps, sh_prev_maps;
     static const void *sh_maps[8];
+    static int sh_many, sh_few;   // auto: 3+ views seen (sticky), and frames since with 1 to auto_runs-1 runs
     if (vk_exec_presented != sh_frame) {   // a new frame: the last one's counts decide this one
         if (sh_frame) {
-            sh_prev_runs = sh_runs, sh_prev_maps = sh_nmaps;
+            sh_prev_maps = sh_nmaps;
+            // A frame with fewer runs (a camera cut, a frame that does not redraw the map) must not draw the shadows
+            // for one frame between frames without them: a flicker. Back to drawing them only after 60 frames in a
+            // row with 1 or 2 runs; frames without any leave it as it is.
+            if (sh_runs >= auto_runs) sh_many = 1, sh_few = 0;
+            else if (sh_runs > 0 && sh_many && ++sh_few >= 60) sh_many = 0;
             sh_hist[sh_runs < 9 ? sh_runs : 9]++;
             if (++sh_frames % 600 == 0) {
                 rt_log("vk_exec: shadow map runs per frame over 600 frames: 0:%llu 1:%llu 2:%llu 3:%llu 4:%llu 5:%llu 6:%llu "
@@ -573,7 +579,7 @@ int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) 
         if (k == sh_nmaps && sh_nmaps < 8) sh_maps[sh_nmaps++] = ex->rt.depth;
     }
     sh_was = is_shadow;
-    if (is_shadow && shadow_mode != 1 && !(shadow_mode == 2 && rt_ab()) && !(shadow_mode == 3 && sh_prev_runs < auto_runs))
+    if (is_shadow && shadow_mode != 1 && !(shadow_mode == 2 && rt_ab()) && !(shadow_mode == 3 && !sh_many))
         return vk_exec_frame.skip[VK_SKIP_OFF]++, 0;
     cb_res(ex);
     dummies_init();
